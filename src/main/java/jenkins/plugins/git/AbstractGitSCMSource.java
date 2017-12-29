@@ -532,7 +532,10 @@ public abstract class AbstractGitSCMSource extends SCMSource {
                         );
                     }
                     if (context.wantBranches()) {
-                        discoverBranches(repository, walk, request, remoteReferences);
+                        // -------------- old variant (https://issues.jenkins-ci.org/browse/JENKINS-46487) -------------- //
+                        discoverBranches(client, remoteName, repository, walk, request);
+                        // -------------- new variant -------------------------------------------------------------------//
+                        //discoverBranches(repository, walk, request, remoteReferences);
                     }
                     if (context.wantTags()) {
                         discoverTags(repository, walk, request, remoteReferences);
@@ -540,6 +543,117 @@ public abstract class AbstractGitSCMSource extends SCMSource {
                 }
                 return null;
             }
+
+            // -------------- old variant (https://issues.jenkins-ci.org/browse/JENKINS-46487) -------------- //
+
+            private void discoverBranches ( GitClient client, String remoteName, final Repository repository,
+                final RevWalk walk, GitSCMSourceRequest request )
+                            throws IOException, InterruptedException {
+                listener.getLogger ().println ( "Getting remote branches..." );
+                walk.setRetainBody ( false );
+                int count = 0;
+                for ( final Branch b: client.getRemoteBranches () ) {
+                    if ( !b.getName ().startsWith ( remoteName + "/" ) ) {
+                        continue;
+                    }
+                    count++;
+                    final String branchName = StringUtils.removeStart ( b.getName (), remoteName + "/" );
+                    if ( request.process ( new SCMHead ( branchName ),
+                        new SCMSourceRequest.IntermediateLambda<ObjectId> () {
+
+                            @Nullable
+                            @Override
+                            public ObjectId create () throws IOException, InterruptedException {
+                                listener.getLogger ().println ( "  Checking branch " + branchName );
+                                return b.getSHA1 ();
+                            }
+                        },
+                        new SCMSourceRequest.ProbeLambda<SCMHead, ObjectId> () {
+
+                            @NonNull
+                            @Override
+                            public SCMSourceCriteria.Probe create ( @NonNull SCMHead head,
+                                @Nullable ObjectId revisionInfo )
+                                            throws IOException, InterruptedException {
+                                RevCommit commit = walk.parseCommit ( revisionInfo );
+                                final long lastModified = TimeUnit.SECONDS.toMillis ( commit.getCommitTime () );
+                                final RevTree tree = commit.getTree ();
+                                return new SCMProbe () {
+
+                                    @Override
+                                    public void close () throws IOException {
+                                        // no-op
+                                    }
+
+                                    @Override
+                                    public String name () {
+                                        return branchName;
+                                    }
+
+                                    @Override
+                                    public long lastModified () {
+                                        return lastModified;
+                                    }
+
+                                    @Override
+                                    @NonNull
+                                    @SuppressFBWarnings ( value = "NP_LOAD_OF_KNOWN_NULL_VALUE",
+                                                    justification = "TreeWalk.forPath can return null, compiler "
+                                                        + "generated code for try with resources handles it" )
+                                    public SCMProbeStat stat ( @NonNull String path ) throws IOException {
+                                        try ( TreeWalk tw = TreeWalk.forPath ( repository, path, tree ) ) {
+                                            if ( tw == null ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.NONEXISTENT );
+                                            }
+                                            FileMode fileMode = tw.getFileMode ( 0 );
+                                            if ( fileMode == FileMode.MISSING ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.NONEXISTENT );
+                                            }
+                                            if ( fileMode == FileMode.EXECUTABLE_FILE ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.REGULAR_FILE );
+                                            }
+                                            if ( fileMode == FileMode.REGULAR_FILE ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.REGULAR_FILE );
+                                            }
+                                            if ( fileMode == FileMode.SYMLINK ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.LINK );
+                                            }
+                                            if ( fileMode == FileMode.TREE ) {
+                                                return SCMProbeStat.fromType ( SCMFile.Type.DIRECTORY );
+                                            }
+                                            return SCMProbeStat.fromType ( SCMFile.Type.OTHER );
+                                        }
+                                    }
+                                };
+                            }
+                        }, new SCMSourceRequest.LazyRevisionLambda<SCMHead, SCMRevision, ObjectId> () {
+
+                            @NonNull
+                            @Override
+                            public SCMRevision create ( @NonNull SCMHead head, @Nullable ObjectId intermediate )
+                                            throws IOException, InterruptedException {
+                                return new SCMRevisionImpl ( head, b.getSHA1String () );
+                            }
+                        }, new SCMSourceRequest.Witness () {
+
+                            @Override
+                            public void record ( @NonNull SCMHead head, SCMRevision revision, boolean isMatch ) {
+                                if ( isMatch ) {
+                                    listener.getLogger ().println ( "    Met criteria" );
+                                } else {
+                                    listener.getLogger ().println ( "    Does not meet criteria" );
+                                }
+                            }
+                        } ) ) {
+                        listener.getLogger ().format ( "Processed %d branches (query complete)%n", count );
+                        return;
+                    }
+                }
+                listener.getLogger ().format ( "Processed %d branches%n", count );
+            }
+            
+            // -------------- new variant ------------------------------------------------------------------ //
+            
 
             private void discoverBranches(final Repository repository,
                                           final RevWalk walk, GitSCMSourceRequest request,
